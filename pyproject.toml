@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "babylm-seqlen"
+version = "0.1.0"
+description = ""
+authors = ["Richard Diehl Martinez <richarddiehl@gmail.com>"]
+license = "Apache 2.0"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+transformers = "^4.51.0"
+dotenv = "^0.9.9"
+jinja2 = "^3.1.6"
+
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.29.5"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

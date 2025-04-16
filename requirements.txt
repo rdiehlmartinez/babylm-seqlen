@@ -1,0 +1,15 @@
+transformers==4.39.3
+datasets==2.19.1
+evaluate==0.4.1
+wandb
+scikit-learn
+tqdm
+pyyaml
+sentencepiece
+einops
+accelerate==0.27.2
+peft
+bitsandbytes
+trl
+# torch (install manually as shown above)
+# mamba-ssm (install manually from GitHub)

@@ -1,7 +1,7 @@
 import os, time
 from datasets import load_dataset
 from transformers import TrainingArguments, Trainer, AutoTokenizer
-from transformers import OPTForCausalLM
+from transformers import OPTConfig, OPTForCausalLM
 from config._config import CheckpointingConfig
 from src.hf_utils import save_to_hf
 from src.utils.utils import get_deepspeed_config
@@ -21,10 +21,19 @@ def train_model(model_type="opt", seq_len=128, use_deepspeed=False, push_to_hub=
 
     os.makedirs(output_dir, exist_ok=True)
     checkpointing_config = CheckpointingConfig(run_name=f"{model_type}_babylm_{seq_len}")
-    tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m")
 
     if model_type == "opt":
-        model = OPTForCausalLM.from_pretrained("facebook/opt-125m")
+        config = OPTConfig(
+            vocab_size=50257,
+            hidden_size=768,
+            num_attention_heads=12,
+            num_hidden_layers=12,
+            intermediate_size=3072,
+            max_position_embeddings=2048,
+            torch_dtype="float16",  # optional for fp16 training
+        )
+        # Initialize model from scratch (no pretrained weights)
+        model = OPTForCausalLM(config)
         data_collator = CustomDataCollator(tokenizer=tokenizer, mlm=False)
         trainer_cls = Trainer
     elif model_type == "mamba":
@@ -92,3 +101,4 @@ if __name__ == "__main__":
         push_to_hub=args.push_to_hub,
         dry_run=args.dry_run
     )
+

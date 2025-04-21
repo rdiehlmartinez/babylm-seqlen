@@ -24,11 +24,6 @@ python train.py --dry_run --no_push_to_hub
 
 HPC 
 ```
-sbatch launch_slurm.wilkes3 --model_type opt --seq_len 1024 --push_to_hub
-sbatch launch_slurm.wilkes3 --model_type mamba --seq_len 1024 --push_to_hub
-```
-
-DeepSpeed Stage3 with Multiple GPU Environment for larger sequences 
-```
-accelerate sbatch launch_slurm.wilkes3  --multi_gpu train.py --model_type opt --seq_len 4096 --use_deepspeed
+sbatch launch_slurm.wilkes3 --model_type opt --seq_len 1024 
+sbatch launch_slurm.wilkes3 --model_type mamba --seq_len 1024 
 ```

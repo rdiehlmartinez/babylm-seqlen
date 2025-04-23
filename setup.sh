@@ -3,10 +3,10 @@
 # Check if the environment directory exists
 if [ ! -d "env" ]; then
     # Load necessary modules
-    module load python-3.10.0-gcc-5.4.0  # Adjust this as per your system's module setup
+    module load python/3.11.0-icl   # Adjust this as per your system's module setup
 
     # Create a new virtual environment
-    virtualenv -p python3.10 env
+    virtualenv -p python3.11 env
     source env/bin/activate
 
     # Install Git LFS (Large File Storage)

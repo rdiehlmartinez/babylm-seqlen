@@ -4,25 +4,28 @@ import wandb
 from datasets import load_dataset
 from transformers import TrainingArguments, Trainer, AutoTokenizer
 from transformers import OPTConfig, OPTForCausalLM
-from config._config import CheckpointingConfig
-from src.hf_utils import save_to_hf  # <- updated
 from src.utils.utils import get_deepspeed_config
-from src.collator import CustomDataCollator
-# from src.mamba_utils import MambaLMHeadModel, MambaConfig, MambaTrainer, save_mamba_model
+
+
+LOG_EVERY_N_STEPS = 10
+SAVE_EVERY_N_STEPS = 500 
+TRAIN_EPOCHS = 10
 
 def train_model(model_type="opt", seq_len=128, use_deepspeed=False, push_to_hub=True, dry_run=False):
     dataset = load_dataset(f"babylm-seqlen/train_100M_{seq_len}_single_shuffle")
     dataset = dataset.map(lambda x: {"labels": x["input_ids"]})
 
+    train_dataset = dataset["train"]
+
     if dry_run:
-        train_dataset = dataset["train"].select(range(100))
+        train_dataset = train_dataset.select(range(100))
         output_dir = f"./dryruns/{model_type}-babylm-{seq_len}"
     else:
-        train_dataset = dataset["train"]
         output_dir = f"./checkpoints/{model_type}-babylm-{seq_len}"
 
     os.makedirs(output_dir, exist_ok=True)
-    checkpointing_config = CheckpointingConfig(run_name=f"{model_type}_babylm_{seq_len}")
+
+    run_name = f"{model_type}_babylm_{seq_len}"
 
     tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m", use_fast=True)
     tokenizer.model_max_length = seq_len
@@ -38,66 +41,57 @@ def train_model(model_type="opt", seq_len=128, use_deepspeed=False, push_to_hub=
             torch_dtype="float16",
         )
         model = OPTForCausalLM(config)
-        data_collator = CustomDataCollator(tokenizer=tokenizer, mlm=False)
-        trainer_cls = Trainer
 
     elif model_type == "mamba":
-        from src.mamba_utils import MambaLMHeadModel, MambaConfig, MambaTrainer, save_mamba_model
-        config = MambaConfig(d_model=256, n_layer=6, vocab_size=50257)
-        model = MambaLMHeadModel(config)
-        data_collator = CustomDataCollator(tokenizer=tokenizer, mlm=False)
-        trainer_cls = MambaTrainer
+        from transformers import MambaConfig, MambaForCausalLM
+        config = MambaConfig(
+            vocab_size=50257,
+            hidden_size=256,
+            num_hidden_layers=6,
+            intermediate_size=1024,  # Adjust as needed
+        )
+        model = MambaForCausalLM(config)
 
     wandb.init(
         project="babylm-seqlen",
-        name=checkpointing_config.run_name,
+        name=run_name,
         config={
             "model_type": model_type,
             "seq_len": seq_len,
-            "use_deepspeed": use_deepspeed,
             "dry_run": dry_run,
-            "push_to_hub": push_to_hub,
         },
         mode="disabled" if dry_run else "online",
     )
 
     training_args = TrainingArguments(
         output_dir=output_dir,
-        per_device_train_batch_size=64,
-        num_train_epochs=10,
+        per_device_train_batch_size=64, # TODO: tune this
+        gradient_accumulation_steps=4, # TODO: tune this
+        num_train_epochs=TRAIN_EPOCHS,
         evaluation_strategy="no",
         save_strategy="steps",
-        save_steps=checkpointing_config.save_every_n_steps,
-        save_total_limit=2,
-        fp16=True,
+        save_steps=SAVE_EVERY_N_STEPS,
+        bf16=True,
         report_to="wandb",
-        run_name=checkpointing_config.run_name,
+        run_name=run_name,
         deepspeed=get_deepspeed_config() if use_deepspeed else None,
-        logging_steps=10,
+        logging_steps=LOG_EVERY_N_STEPS,
         disable_tqdm=False,
+        push_to_hub=push_to_hub,
+        hub_model_id=f"babylm-seqlen/{model_type}-{seq_len}",
+        hub_strategy="every_save",
     )
 
-    trainer = trainer_cls(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         tokenizer=tokenizer,
-        data_collator=data_collator,
     )
 
     start_time = time.time()
     trainer.train()
     end_time = time.time()
-
-    if model_type == "mamba":
-        save_mamba_model(model, model.config, output_dir, tokenizer)
-    else:
-        trainer.save_model(output_dir)
-        tokenizer.save_pretrained(output_dir)
-
-    if push_to_hub:
-        repo_id = f"babylm-seqlen/{model_type}-babylm-{seq_len}"
-        save_to_hf(model_type, output_dir, repo_id)
 
     print(f"✅ Training {model_type.upper()} for seq_len {seq_len} done in {end_time - start_time:.2f}s")
 

@@ -1,20 +1,27 @@
 import os
 import time
 
-import wandb
 from datasets import load_dataset
 from transformers import (
-    AutoTokenizer,
     OPTConfig,
     OPTForCausalLM,
     Trainer,
     TrainingArguments,
 )
 
+import wandb
+
 # Constants and Helpers
 LOG_EVERY_N_STEPS = 10
-SAVE_EVERY_N_STEPS = 500
+SAVE_EVERY_N_STEPS = 500  # TODO: watch out needs to be tuned if we want to evaluate model at same point in learning
 TRAIN_EPOCHS = 10
+
+# TODO: Needs to be tuned for each model
+GLOBAL_BATCH_SIZE = 64  # NOTE: (rdm) 64 is nice because 64*16k = 1M tokens per batch
+GRADIENT_ACCUMULATION_STEPS = 4
+
+NUM_DEVICES = 4  # TODO: automatically infer this
+PER_DEVICE_BATCH_SIZE = GLOBAL_BATCH_SIZE // NUM_DEVICES
 
 
 def get_deepspeed_config():
@@ -24,9 +31,9 @@ def get_deepspeed_config():
             "offload_optimizer": {"device": "cpu"},
             "offload_param": {"device": "cpu"},
         },
-        "train_batch_size": 64,
-        "gradient_accumulation_steps": 1,
-        "fp16": {"enabled": True},
+        "train_batch_size": GLOBAL_BATCH_SIZE,
+        "gradient_accumulation_steps": GRADIENT_ACCUMULATION_STEPS,
+        "bf16": {"enabled": True},
     }
 
 
@@ -37,7 +44,7 @@ def train_model(
     model_type="opt", seq_len=128, use_deepspeed=False, push_to_hub=True, dry_run=False
 ):
     dataset = load_dataset(f"babylm-seqlen/train_100M_{seq_len}_single_shuffle")
-    dataset = dataset.map(lambda x: {"labels": x["input_ids"]})
+    dataset = dataset.map(lambda x: {"labels": x["input_ids"]}, num_proc=16)
 
     train_dataset = dataset["train"]
 
@@ -51,9 +58,6 @@ def train_model(
 
     run_name = f"{model_type}_babylm_{seq_len}"
 
-    tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m", use_fast=True)
-    tokenizer.model_max_length = seq_len
-
     if model_type == "opt":
         config = OPTConfig(
             vocab_size=50257,
@@ -61,8 +65,7 @@ def train_model(
             num_attention_heads=12,
             num_hidden_layers=12,
             intermediate_size=3072,
-            max_position_embeddings=2048,
-            torch_dtype="float16",
+            max_position_embeddings=seq_len,
         )
         model = OPTForCausalLM(config)
 
@@ -78,22 +81,18 @@ def train_model(
         model = MambaForCausalLM(config)
 
     wandb.init(
-        project="babylm-seqlen",
+        entity="babylm-seqlen",
+        project=f"{model_type}-models",
         name=run_name,
-        config={
-            "model_type": model_type,
-            "seq_len": seq_len,
-            "dry_run": dry_run,
-        },
         mode="disabled" if dry_run else "online",
     )
 
     training_args = TrainingArguments(
         output_dir=output_dir,
-        per_device_train_batch_size=64,  # TODO: tune this
-        gradient_accumulation_steps=4,  # TODO: tune this
+        per_device_train_batch_size=PER_DEVICE_BATCH_SIZE,  # TODO: tune this
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,  # TODO: tune this
         num_train_epochs=TRAIN_EPOCHS,
-        evaluation_strategy="no",
+        eval_strategy="no",
         save_strategy="steps",
         save_steps=SAVE_EVERY_N_STEPS,
         bf16=True,
@@ -111,8 +110,42 @@ def train_model(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        tokenizer=tokenizer,
     )
+
+    # Print model statistics with pretty formatting
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    # Calculate dataset size
+    dataset_size = len(train_dataset)
+    total_tokens = dataset_size * seq_len
+
+    # Create a pretty box for the model stats
+    box_width = 70
+    print("\n" + "=" * box_width)
+    print(f"{'📊 MODEL TRAINING CONFIGURATION 📊':^{box_width}}")
+    print("=" * box_width)
+    print(f"🤖 {'Model:':<25} \033[1m{model_type.upper()}\033[0m")
+    print(f"📏 {'Sequence Length:':<25} \033[1m{seq_len}\033[0m")
+    print(f"🧠 {'Total parameters:':<25} \033[1m{total_params:,}\033[0m")
+    print(f"🔄 {'Trainable parameters:':<25} \033[1m{trainable_params:,}\033[0m")
+    print("-" * box_width)
+    print(f"🔢 {'Batch size per device:':<25} \033[1m{PER_DEVICE_BATCH_SIZE}\033[0m")
+    print(f"🌐 {'Global batch size:':<25} \033[1m{GLOBAL_BATCH_SIZE}\033[0m")
+    print(
+        f"📚 {'Gradient accum. steps:':<25} \033[1m{GRADIENT_ACCUMULATION_STEPS}\033[0m"
+    )
+    print(
+        f"🚀 {'Effective batch size:':<25} \033[1m{GLOBAL_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS:,}\033[0m"
+    )
+    print(f"💻 {'Number of devices:':<25} \033[1m{NUM_DEVICES}\033[0m")
+    print("-" * box_width)
+    print(f"📈 {'Training epochs:':<25} \033[1m{TRAIN_EPOCHS}\033[0m")
+    print(f"📊 {'Dataset size:':<25} \033[1m{dataset_size:,} examples\033[0m")
+    print(f"🔤 {'Total tokens:':<25} \033[1m{total_tokens:,}\033[0m")
+    print(f"⚙️  {'DeepSpeed enabled:':<25} \033[1m{use_deepspeed}\033[0m")
+    print(f"🤗 {'Push to Hub:':<25} \033[1m{push_to_hub}\033[0m")
+    print("=" * box_width + "\n")
 
     start_time = time.time()
     trainer.train()

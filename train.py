@@ -11,17 +11,16 @@ from transformers import (
 
 import wandb
 
-# Constants and Helpers
+# --- Constants and Helpers --- #
+
 LOG_EVERY_N_STEPS = 10
 SAVE_EVERY_N_STEPS = 500  # TODO: watch out needs to be tuned if we want to evaluate model at same point in learning
 TRAIN_EPOCHS = 10
 
 # TODO: Needs to be tuned for each model
-GLOBAL_BATCH_SIZE = 64  # NOTE: (rdm) 64 is nice because 64*16k = 1M tokens per batch
+GLOBAL_BATCH_SIZE = 512  # NOTE: (rdm) 64 is nice because 64*16k = 1M tokens per batch
 GRADIENT_ACCUMULATION_STEPS = 4
-
-NUM_DEVICES = 4  # TODO: automatically infer this
-PER_DEVICE_BATCH_SIZE = GLOBAL_BATCH_SIZE // NUM_DEVICES
+NUM_DEVICES = 4
 
 
 def get_deepspeed_config():
@@ -37,12 +36,16 @@ def get_deepspeed_config():
     }
 
 
-# Model Train Script
+# --- Model Train Script --- #
 
 
 def train_model(
     model_type="opt", seq_len=128, use_deepspeed=False, push_to_hub=True, dry_run=False
 ):
+    ###
+    ### Setup Dataset and Models
+    ###
+
     dataset = load_dataset(f"babylm-seqlen/train_100M_{seq_len}_single_shuffle")
     dataset = dataset.map(lambda x: {"labels": x["input_ids"]}, num_proc=16)
 
@@ -87,9 +90,14 @@ def train_model(
         mode="disabled" if dry_run else "online",
     )
 
+    ###
+    ### Setup Training Arguments
+    ###
+
     training_args = TrainingArguments(
         output_dir=output_dir,
-        per_device_train_batch_size=PER_DEVICE_BATCH_SIZE,  # TODO: tune this
+        per_device_train_batch_size=GLOBAL_BATCH_SIZE
+        // (GRADIENT_ACCUMULATION_STEPS * NUM_DEVICES),  # TODO: tune this
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,  # TODO: tune this
         num_train_epochs=TRAIN_EPOCHS,
         eval_strategy="no",
@@ -106,21 +114,23 @@ def train_model(
         hub_strategy="every_save",
     )
 
+    ###
+    ### Setup Trainer
+    ###
+
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
     )
 
-    # Print model statistics with pretty formatting
+    ###
+    ### Print Model Statistics
+    ###
+
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    # Calculate dataset size
-    dataset_size = len(train_dataset)
-    total_tokens = dataset_size * seq_len
-
-    # Create a pretty box for the model stats
     box_width = 70
     print("\n" + "=" * box_width)
     print(f"{'📊 MODEL TRAINING CONFIGURATION 📊':^{box_width}}")
@@ -129,23 +139,11 @@ def train_model(
     print(f"📏 {'Sequence Length:':<25} \033[1m{seq_len}\033[0m")
     print(f"🧠 {'Total parameters:':<25} \033[1m{total_params:,}\033[0m")
     print(f"🔄 {'Trainable parameters:':<25} \033[1m{trainable_params:,}\033[0m")
-    print("-" * box_width)
-    print(f"🔢 {'Batch size per device:':<25} \033[1m{PER_DEVICE_BATCH_SIZE}\033[0m")
-    print(f"🌐 {'Global batch size:':<25} \033[1m{GLOBAL_BATCH_SIZE}\033[0m")
-    print(
-        f"📚 {'Gradient accum. steps:':<25} \033[1m{GRADIENT_ACCUMULATION_STEPS}\033[0m"
-    )
-    print(
-        f"🚀 {'Effective batch size:':<25} \033[1m{GLOBAL_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS:,}\033[0m"
-    )
-    print(f"💻 {'Number of devices:':<25} \033[1m{NUM_DEVICES}\033[0m")
-    print("-" * box_width)
-    print(f"📈 {'Training epochs:':<25} \033[1m{TRAIN_EPOCHS}\033[0m")
-    print(f"📊 {'Dataset size:':<25} \033[1m{dataset_size:,} examples\033[0m")
-    print(f"🔤 {'Total tokens:':<25} \033[1m{total_tokens:,}\033[0m")
-    print(f"⚙️  {'DeepSpeed enabled:':<25} \033[1m{use_deepspeed}\033[0m")
-    print(f"🤗 {'Push to Hub:':<25} \033[1m{push_to_hub}\033[0m")
     print("=" * box_width + "\n")
+
+    ###
+    ### Train Model
+    ###
 
     start_time = time.time()
     trainer.train()

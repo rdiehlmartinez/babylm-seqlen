@@ -10,6 +10,9 @@ ASCII_ART="
 "
 # NOTE: Code fails if we don't include the above ASCII art
 
+# Need to load newer gcc to compile deepspeed c code 
+module load gcc/9.4.0/gcc-11.2.0-72sgv5z
+
 # Print the ASCII art and taglines
 echo -e "\033[1;36m$ASCII_ART\033[0m"  # Cyan color
 

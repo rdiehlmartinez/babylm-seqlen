@@ -1,31 +1,65 @@
 import os
 import time
-import wandb
-from datasets import load_dataset
-from transformers import TrainingArguments, Trainer, AutoTokenizer
-from transformers import OPTConfig, OPTForCausalLM
-from config._config import CheckpointingConfig
-from src.hf_utils import save_to_hf  # <- updated
-from src.utils.utils import get_deepspeed_config
-from src.collator import CustomDataCollator
-# from src.mamba_utils import MambaLMHeadModel, MambaConfig, MambaTrainer, save_mamba_model
 
-def train_model(model_type="opt", seq_len=128, use_deepspeed=False, push_to_hub=True, dry_run=False):
+from datasets import load_dataset
+from transformers import (
+    OPTConfig,
+    OPTForCausalLM,
+    Trainer,
+    TrainingArguments,
+)
+
+import wandb
+
+# --- Constants and Helpers --- #
+
+LOG_EVERY_N_STEPS = 10
+SAVE_EVERY_N_STEPS = 500  # TODO: watch out needs to be tuned if we want to evaluate model at same point in learning
+TRAIN_EPOCHS = 10
+
+# TODO: Needs to be tuned for each model
+GLOBAL_BATCH_SIZE = 512  # NOTE: (rdm) 64 is nice because 64*16k = 1M tokens per batch
+GRADIENT_ACCUMULATION_STEPS = 4
+NUM_DEVICES = 4
+
+
+def get_deepspeed_config():
+    return {
+        "zero_optimization": {
+            "stage": 3,
+            "offload_optimizer": {"device": "cpu"},
+            "offload_param": {"device": "cpu"},
+        },
+        "train_batch_size": GLOBAL_BATCH_SIZE,
+        "gradient_accumulation_steps": GRADIENT_ACCUMULATION_STEPS,
+        "bf16": {"enabled": True},
+    }
+
+
+# --- Model Train Script --- #
+
+
+def train_model(
+    model_type="opt", seq_len=128, use_deepspeed=False, push_to_hub=True, dry_run=False
+):
+    ###
+    ### Setup Dataset and Models
+    ###
+
     dataset = load_dataset(f"babylm-seqlen/train_100M_{seq_len}_single_shuffle")
-    dataset = dataset.map(lambda x: {"labels": x["input_ids"]})
+    dataset = dataset.map(lambda x: {"labels": x["input_ids"]}, num_proc=16)
+
+    train_dataset = dataset["train"]
 
     if dry_run:
-        train_dataset = dataset["train"].select(range(100))
+        train_dataset = train_dataset.select(range(100))
         output_dir = f"./dryruns/{model_type}-babylm-{seq_len}"
     else:
-        train_dataset = dataset["train"]
         output_dir = f"./checkpoints/{model_type}-babylm-{seq_len}"
 
     os.makedirs(output_dir, exist_ok=True)
-    checkpointing_config = CheckpointingConfig(run_name=f"{model_type}_babylm_{seq_len}")
 
-    tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m", use_fast=True)
-    tokenizer.model_max_length = seq_len
+    run_name = f"{model_type}_babylm_{seq_len}"
 
     if model_type == "opt":
         config = OPTConfig(
@@ -34,81 +68,106 @@ def train_model(model_type="opt", seq_len=128, use_deepspeed=False, push_to_hub=
             num_attention_heads=12,
             num_hidden_layers=12,
             intermediate_size=3072,
-            max_position_embeddings=2048,
-            torch_dtype="float16",
+            max_position_embeddings=seq_len,
         )
         model = OPTForCausalLM(config)
-        data_collator = CustomDataCollator(tokenizer=tokenizer, mlm=False)
-        trainer_cls = Trainer
 
     elif model_type == "mamba":
-        from src.mamba_utils import MambaLMHeadModel, MambaConfig, MambaTrainer, save_mamba_model
-        config = MambaConfig(d_model=256, n_layer=6, vocab_size=50257)
-        model = MambaLMHeadModel(config)
-        data_collator = CustomDataCollator(tokenizer=tokenizer, mlm=False)
-        trainer_cls = MambaTrainer
+        from transformers import MambaConfig, MambaForCausalLM
+
+        config = MambaConfig(
+            vocab_size=50257,
+            hidden_size=256,
+            num_hidden_layers=6,
+            intermediate_size=1024,  # Adjust as needed
+        )
+        model = MambaForCausalLM(config)
 
     wandb.init(
-        project="babylm-seqlen",
-        name=checkpointing_config.run_name,
-        config={
-            "model_type": model_type,
-            "seq_len": seq_len,
-            "use_deepspeed": use_deepspeed,
-            "dry_run": dry_run,
-            "push_to_hub": push_to_hub,
-        },
+        entity="babylm-seqlen",
+        project=f"{model_type}-models",
+        name=run_name,
         mode="disabled" if dry_run else "online",
     )
 
+    ###
+    ### Setup Training Arguments
+    ###
+
     training_args = TrainingArguments(
         output_dir=output_dir,
-        per_device_train_batch_size=64,
-        num_train_epochs=10,
-        evaluation_strategy="no",
+        per_device_train_batch_size=GLOBAL_BATCH_SIZE
+        // (GRADIENT_ACCUMULATION_STEPS * NUM_DEVICES),  # TODO: tune this
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,  # TODO: tune this
+        num_train_epochs=TRAIN_EPOCHS,
+        eval_strategy="no",
         save_strategy="steps",
-        save_steps=checkpointing_config.save_every_n_steps,
-        save_total_limit=2,
-        fp16=True,
+        save_steps=SAVE_EVERY_N_STEPS,
+        bf16=True,
         report_to="wandb",
-        run_name=checkpointing_config.run_name,
+        run_name=run_name,
         deepspeed=get_deepspeed_config() if use_deepspeed else None,
-        logging_steps=10,
+        logging_steps=LOG_EVERY_N_STEPS,
         disable_tqdm=False,
+        push_to_hub=push_to_hub,
+        hub_model_id=f"babylm-seqlen/{model_type}-{seq_len}",
+        hub_strategy="every_save",
     )
 
-    trainer = trainer_cls(
+    ###
+    ### Setup Trainer
+    ###
+
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        tokenizer=tokenizer,
-        data_collator=data_collator,
     )
+
+    ###
+    ### Print Model Statistics
+    ###
+
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    box_width = 70
+    print("\n" + "=" * box_width)
+    print(f"{'📊 MODEL TRAINING CONFIGURATION 📊':^{box_width}}")
+    print("=" * box_width)
+    print(f"🤖 {'Model:':<25} \033[1m{model_type.upper()}\033[0m")
+    print(f"📏 {'Sequence Length:':<25} \033[1m{seq_len}\033[0m")
+    print(f"🧠 {'Total parameters:':<25} \033[1m{total_params:,}\033[0m")
+    print(f"🔄 {'Trainable parameters:':<25} \033[1m{trainable_params:,}\033[0m")
+    print("=" * box_width + "\n")
+
+    ###
+    ### Train Model
+    ###
 
     start_time = time.time()
     trainer.train()
     end_time = time.time()
 
-    if model_type == "mamba":
-        save_mamba_model(model, model.config, output_dir, tokenizer)
-    else:
-        trainer.save_model(output_dir)
-        tokenizer.save_pretrained(output_dir)
-
-    if push_to_hub:
-        repo_id = f"babylm-seqlen/{model_type}-babylm-{seq_len}"
-        save_to_hf(model_type, output_dir, repo_id)
-
-    print(f"✅ Training {model_type.upper()} for seq_len {seq_len} done in {end_time - start_time:.2f}s")
+    print(
+        f"✅ Training {model_type.upper()} for seq_len {seq_len} done in {end_time - start_time:.2f}s"
+    )
 
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_type", type=str, default="opt", choices=["opt", "mamba"])
+    parser.add_argument(
+        "--model_type", type=str, default="opt", choices=["opt", "mamba"]
+    )
     parser.add_argument("--seq_len", type=int, default=128)
     parser.add_argument("--use_deepspeed", action="store_true")
-    parser.add_argument("--no_push_to_hub", action="store_true", help="If set, do NOT push to the Hugging Face Hub.")
+    parser.add_argument(
+        "--no_push_to_hub",
+        action="store_true",
+        help="If set, do NOT push to the Hugging Face Hub.",
+    )
     parser.add_argument("--dry_run", action="store_true")
 
     args = parser.parse_args()
@@ -118,5 +177,5 @@ if __name__ == "__main__":
         seq_len=args.seq_len,
         use_deepspeed=args.use_deepspeed,
         push_to_hub=not args.no_push_to_hub,
-        dry_run=args.dry_run
+        dry_run=args.dry_run,
     )

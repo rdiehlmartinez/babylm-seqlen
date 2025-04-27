@@ -12,4 +12,3 @@ peft
 bitsandbytes
 trl
 # torch (install manually as shown above)
-# mamba-ssm (install manually from GitHub)

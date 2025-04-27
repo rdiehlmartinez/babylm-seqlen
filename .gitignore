@@ -180,3 +180,9 @@ data/*
 
 # Ignore the poetry.lock file
 poetry.lock
+
+
+# Ignore wandb
+wandb/
+
+poetry-cache/

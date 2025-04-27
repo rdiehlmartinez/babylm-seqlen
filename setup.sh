@@ -1,41 +1,36 @@
 #!/bin/bash
 
-# Check if the environment directory exists
-if [ ! -d "env" ]; then
-    # Load necessary modules
-    module load python-3.10.0-gcc-5.4.0  # Adjust this as per your system's module setup
+ASCII_ART="
+██████╗  █████╗ ██████╗ ██╗   ██╗██╗     ███╗   ███╗      ███████╗███████╗ ██████╗ ██╗     ███████╗███╗   ██╗
+██╔══██╗██╔══██╗██╔══██╗╚██╗ ██╔╝██║     ████╗ ████║      ██╔════╝██╔════╝██╔═══██╗██║     ██╔════╝████╗  ██║
+██████╔╝███████║██████╔╝ ╚████╔╝ ██║     ██╔████╔██║█████╗███████╗█████╗  ██║   ██║██║     █████╗  ██╔██╗ ██║
+██╔══██╗██╔══██║██╔══██╗  ╚██╔╝  ██║     ██║╚██╔╝██║╚════╝╚════██║██╔══╝  ██║▄▄ ██║██║     ██╔══╝  ██║╚██╗██║
+██████╔╝██║  ██║██████╔╝   ██║   ███████╗██║ ╚═╝ ██║      ███████║███████╗╚██████╔╝███████╗███████╗██║ ╚████║
+╚═════╝ ╚═╝  ╚═╝╚═════╝    ╚═╝   ╚══════╝╚═╝     ╚═╝      ╚══════╝╚══════╝ ╚══▀▀═╝ ╚══════╝╚══════╝╚═╝  ╚═══╝
+"
+# NOTE: Code fails if we don't include the above ASCII art
 
-    # Create a new virtual environment
-    virtualenv -p python3.10 env
-    source env/bin/activate
+# Need to load newer gcc to compile deepspeed c code 
+module load gcc/9.4.0/gcc-11.2.0-72sgv5z
 
-    # Install Git LFS (Large File Storage)
-    git lfs install
+# Print the ASCII art and taglines
+echo -e "\033[1;36m$ASCII_ART\033[0m"  # Cyan color
 
-    # Install the Python dependencies
-    pip install --upgrade pip
-    pip install -r requirements.txt
-
-    # Install PyTorch with specific CUDA version if needed (adjust for your setup)
-    pip install torch==2.5.1+cu118 torchvision==0.15.1+cu118 torchaudio==2.0.1 --extra-index-url https://download.pytorch.org/whl/cu118
-
-    # Install pre-commit hooks
-    pre-commit install
-
-    # Log in to Hugging Face and WandB
-    huggingface-cli login
-    wandb login
-
+echo "🔑 Authenticating with Hugging Face..."
+if [ -f ~/.huggingface/token ]; then
+    echo "✓ Already logged in to Hugging Face"
 else
-    # If the environment already exists, just activate it
-    source env/bin/activate
+    huggingface-cli login
 fi
 
-# Source any environment variables in .env
-source .env
+echo "🔑 Authenticating with Weights & Biases..."
+if wandb status &>/dev/null; then
+    echo "✓ Already logged in to Weights & Biases"
+else
+    wandb login
+fi
 
-# Update the PATH if needed
-export PATH="$(pwd)/lib/bin:$PATH"
+echo "📦 Installing dependencies with Poetry..."
+poetry install --no-root
 
-# Optional: Verify that everything is set up correctly
-echo "Environment setup complete."
+echo "✅ Setup complete! You're ready to train some AMAZING models! 🎉"

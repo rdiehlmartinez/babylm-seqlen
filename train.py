@@ -8,7 +8,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
-
+import torch
 import wandb
 
 # --- Constants and Helpers --- #
@@ -35,6 +35,44 @@ def get_deepspeed_config():
         "bf16": {"enabled": True},
     }
 
+# --- Adding Custom Checkpointing required for BabyLM 2025 (sas245) --- #
+
+def get_next_checkpoint(words_seen, last_checkpoint):
+    if words_seen < 10_000_000:
+        interval = 1_000_000
+    elif words_seen < 100_000_000:
+        interval = 10_000_000
+    else:
+        interval = 100_000_000
+
+    next_checkpoint = ((last_checkpoint // interval) + 1) * interval
+    if words_seen >= next_checkpoint:
+        return next_checkpoint
+    return None
+
+class TokenCheckpointTrainer(Trainer):
+    def __init__(self, *args, track="DEFAULT", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.words_seen = 0
+        self.last_checkpoint = 0
+        self.track = track
+
+    def training_step(self, model, inputs):
+        # Get batch size (words seen = input token count)
+        input_ids = inputs["input_ids"]
+        batch_words = torch.numel(input_ids)
+        self.words_seen += batch_words
+
+        # Standard training step
+        loss = super().training_step(model, inputs)
+
+        # Check if we should checkpoint
+        next_checkpoint = get_next_checkpoint(self.words_seen, self.last_checkpoint)
+        if next_checkpoint and (self.track != "STRICT-SMALL" or next_checkpoint <= 100_000_000):
+            self.save_model(os.path.join(self.args.output_dir, f"checkpoint-{next_checkpoint // 1_000_000}M"))
+            self.last_checkpoint = next_checkpoint
+
+        return loss
 
 # --- Model Train Script --- #
 
@@ -54,6 +92,7 @@ def train_model(
     if dry_run:
         train_dataset = train_dataset.select(range(100))
         output_dir = f"./dryruns/{model_type}-babylm-{seq_len}"
+        track = "STRICT-SMALL" #Checkpointing function works for STRICT-SMALL skipping 100M+ checkpoints, for now just dummy functionality
     else:
         output_dir = f"./checkpoints/{model_type}-babylm-{seq_len}"
 
@@ -102,7 +141,7 @@ def train_model(
         num_train_epochs=TRAIN_EPOCHS,
         eval_strategy="no",
         save_strategy="steps",
-        save_steps=SAVE_EVERY_N_STEPS,
+        save_steps=SAVE_EVERY_N_STEPS, #or we can disable fixed-step checkpointing: save_strategy="no"
         bf16=True,
         report_to="wandb",
         run_name=run_name,
@@ -118,10 +157,11 @@ def train_model(
     ### Setup Trainer
     ###
 
-    trainer = Trainer(
+    trainer = TokenCheckpointTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
+        track=track,
     )
 
     ###

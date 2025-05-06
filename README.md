@@ -14,7 +14,7 @@ Train and push models to HuggingFace Hub
 poetry run train --model_type opt --seq_len 1024
 poetry run train --model_type mamba --seq_len 1024 
 ```
-The default case `python run train --dry_run` is 128 sequence length with OPT.
+The default case `poetry run train --dry_run` is 128 sequence length with OPT.
 
 You can add  `--dry_run` and/or `--no_push_to_hub` 
 ```

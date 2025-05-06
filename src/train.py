@@ -34,7 +34,7 @@ def get_deepspeed_config(accumulation_steps, num_devices):
             "offload_optimizer": {"device": "cpu"},
             "offload_param": {"device": "cpu"},
         },
-        "train_batch_size": GLOBAL_BATCH_SIZE / num_devices,
+        "train_batch_size": GLOBAL_BATCH_SIZE // num_devices,
         "gradient_accumulation_steps": accumulation_steps,
         "bf16": {"enabled": True},
     }
@@ -65,7 +65,7 @@ class CustomCheckpointingCallback(TrainerCallback):
             next_save_step = int((self.num_checkpoints+1) * segment_size)
             state.save_steps = next_save_step if state.global_step - next_save_step > 0 else next_save_step+1
             print(f"Checkpointing at step {state.global_step}")
-            if self.num_checkpoints == 10:
+            if self.num_checkpoints == 9:
                 self.rate *= 10
                 self.num_checkpoints = 0
 
@@ -85,6 +85,15 @@ def train_model(
     ###
     ### Setup Dataset and Models
     ###
+
+    per_device_batch_size = GLOBAL_BATCH_SIZE / (accumulation_steps * num_devices)
+    if int(per_device_batch_size) != per_device_batch_size:
+        raise ValueError(
+            f"Batch size {per_device_batch_size} is not an integer. "
+            f"Please adjust the GLOBAL_BATCH_SIZE, num_devices, and accumulation_steps."
+        )
+    per_device_batch_size = int(per_device_batch_size)
+    print(f"Per device batch size: {per_device_batch_size} for an effective batch size of {accumulation_steps} * {num_devices} = {GLOBAL_BATCH_SIZE}")
 
     try:
         dataset = load_dataset(f"babylm-seqlen/train_100M_{seq_len}_single_shuffle")
@@ -146,13 +155,9 @@ def train_model(
     custom_checkpointing_callback = CustomCheckpointingCallback(total_steps)
     print(f'Initial save steps set to 1% of an epoch: {initial_save_steps:.2f} steps')
 
-    per_device_batch_size = GLOBAL_BATCH_SIZE // (accumulation_steps * num_devices)
-    print(f"Per device batch size: {per_device_batch_size} for an effective batch size of {accumulation_steps} * {num_devices} = {GLOBAL_BATCH_SIZE}")
-
     training_args = TrainingArguments(
         output_dir=output_dir,
-        per_device_train_batch_size=GLOBAL_BATCH_SIZE
-        // (accumulation_steps * num_devices),
+        per_device_train_batch_size=per_device_batch_size,
         gradient_accumulation_steps=accumulation_steps,
         num_train_epochs=TRAIN_EPOCHS,
         eval_strategy="no",

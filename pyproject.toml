@@ -1,10 +1,14 @@
 [tool.poetry]
-name = "babylm-seqlen"
+name = "babylm_seqlen"
+packages = [{ include = "src"}]
 version = "0.1.0"
 description = "BabyLM Submission 2025"
 authors = ["rdiehlmartinez <richarddiehl@gmail.com>"]
 license = "Apache 2.0"
 readme = "README.md"
+
+[tool.poetry.scripts]
+train = "src.train:main"
 
 [tool.poetry.dependencies]
 python = "^3.9"

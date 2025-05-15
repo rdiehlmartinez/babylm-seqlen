@@ -1,1 +1,4 @@
-cache-dir = "poetry-cache"
+[virtualenvs]
+in-project = true  # Put the virtualenv in ./venv or ./.venv
+path = "venv"  # Custom path for venvs (relative or absolute)
+

@@ -17,13 +17,13 @@
 #SBATCH --nodes=1
 #! How many (MPI) tasks will there be in total?
 #! Note probably this should not exceed the total number of GPUs in use.
-#SBATCH --ntasks-per-node=4
+#SBATCH --ntasks=1
 #! Specify the number of GPUs per node (between 1 and 4; must be 4 if nodes>1).
 #! Note that the job submission script will enforce no more than 32 cpus per GPU.
-#SBATCH --gres=gpu:4
+#SBATCH --exclusive
 
 #! How much wallclock time will be required?
-#SBATCH --time=5:00:00
+#SBATCH --time=10:00:00
 #! What types of email messages do you wish to receive?
 #SBATCH --mail-type=FAIL
 #! Uncomment this to prevent the job from being requeued (e.g. if
@@ -81,7 +81,7 @@ echo "Current directory: `pwd`"
 nodes=( $( scontrol show hostnames $SLURM_JOB_NODELIST ) )
 nodes_array=($nodes)
 head_node=${nodes_array[0]}
-head_node_ip=$(srun --nodes=1 --ntasks=4 -w "$head_node" hostname --ip-address)
+head_node_ip=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
 port_number=$(shuf -i 29510-49510 -n 1)
 
 echo Node IP: $head_node_ip
@@ -89,12 +89,9 @@ export LOGLEVEL=INFO
 
 #! CD back to root directory
 cd ..
-source setup.sh
+source .venv/bin/activate
 
 srun torchrun \
 --nnodes 1 \
---nproc_per_node 4 \
---rdzv_id $RANDOM \
---rdzv_backend c10d \
---rdzv_endpoint $head_node_ip:$port_number \
-scr/train.py $@
+--nproc-per-node 4 \
+src/train.py $@

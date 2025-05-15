@@ -121,7 +121,7 @@ def train_model(
             hidden_size=768,
             num_attention_heads=12,
             num_hidden_layers=12,
-            intermediate_size=3072,
+            ffn_dim=3072,
             max_position_embeddings=seq_len,
         )
         model = OPTForCausalLM(config)
@@ -131,18 +131,19 @@ def train_model(
 
         config = MambaConfig(
             vocab_size=50257,
-            hidden_size=256,
-            num_hidden_layers=6,
-            intermediate_size=1024,  # Adjust as needed
+            hidden_size=768,
+            num_hidden_layers=32,
         )
         model = MambaForCausalLM(config)
 
-    wandb.init(
-        entity="babylm-seqlen",
-        project=f"{model_type}-models",
-        name=run_name,
-        mode="disabled" if dry_run else "online",
-    )
+    local_rank = int(os.environ.get("RANK", 0))
+    if local_rank == 0:
+        wandb.init(
+            entity="babylm-seqlen",
+            project=f"{model_type}-models",
+            name=run_name,
+            mode="disabled" if dry_run else "online",
+        )
 
     ###
     ### Setup Training Arguments
@@ -198,10 +199,10 @@ def train_model(
     print("\n" + "=" * box_width)
     print(f"{'📊 MODEL TRAINING CONFIGURATION 📊':^{box_width}}")
     print("=" * box_width)
-    print(f"🤖 {'Model:':<25} \033[1m{model_type.upper()}\033[0m")
-    print(f"📏 {'Sequence Length:':<25} \033[1m{seq_len}\033[0m")
-    print(f"🧠 {'Total parameters:':<25} \033[1m{total_params:,}\033[0m")
-    print(f"🔄 {'Trainable parameters:':<25} \033[1m{trainable_params:,}\033[0m")
+    print(f"🤖 {'Model:':<25} {model_type.upper()}")
+    print(f"📏 {'Sequence Length:':<25} {seq_len}")
+    print(f"🧠 {'Total parameters:':<25} {total_params}")
+    print(f"🔄 {'Trainable parameters:':<25} {trainable_params}")
     print("=" * box_width + "\n")
 
     ###

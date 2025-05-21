@@ -187,3 +187,9 @@ wandb/
 
 poetry-cache/
 checkpoints/
+
+scripts/slurm-*.out
+scripts/slurm_out
+
+dryruns/
+

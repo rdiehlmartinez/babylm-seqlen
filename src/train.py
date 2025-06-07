@@ -3,6 +3,7 @@ import time
 
 from datasets import load_dataset
 from transformers import (
+    AutoTokenizer,
     OPTConfig,
     OPTForCausalLM,
     Trainer,
@@ -40,34 +41,30 @@ def get_deepspeed_config(accumulation_steps, num_devices):
 
 class CustomCheckpointingCallback(TrainerCallback):
     """
-    A [`TrainerCallback`] that adjusts the rate of checkpointing according to the BabyLM specifications:
-        Every 10 checkpoints, we increase the checkpointing rate by a factor of 10.  
+    Implements BabyLM checkpointing:
+    - Every 1M words until 10M
+    - Every 10M words until 100M
+    - Every 100M words until 1B
     """
-
-    def __init__(self, total_steps):
+    def __init__(self, seq_len):
         super().__init__()
-        self.num_checkpoints = 0
-        self.rate = 0.001
-        self.total_steps = total_steps
+        self.seq_len = seq_len
+        self.words_per_step = GLOBAL_BATCH_SIZE * seq_len
+        # Build the list of checkpoint word counts
+        self.checkpoint_words = (
+            [i * 1_000_000 for i in range(1, 11)] +      # 1M to 10M
+            [i * 10_000_000 for i in range(2, 11)] +     # 20M to 100M
+            [i * 100_000_000 for i in range(2, 11)]      # 200M to 1B
+        )
+        self.next_checkpoint_idx = 0
 
     def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
-        if (
-            args.save_strategy == SaveStrategy.STEPS
-            and state.save_steps > 0
-            and state.global_step % state.save_steps == 0
-        ):
+        words_seen = state.global_step * self.words_per_step
+        if (self.next_checkpoint_idx < len(self.checkpoint_words) and
+            words_seen >= self.checkpoint_words[self.next_checkpoint_idx]):
             control.should_save = True
-            self.num_checkpoints += 1
-            # Handle very small initial save_steps due to very large
-            # sequence lengths by recalculating save_steps after each checkpoint.
-            segment_size = self.rate * self.total_steps
-            next_save_step = int((self.num_checkpoints+1) * segment_size)
-            state.save_steps = next_save_step if state.global_step - next_save_step > 0 else next_save_step+1
-            print(f"Checkpointing at step {state.global_step}")
-            if self.num_checkpoints == 9:
-                self.rate *= 10
-                self.num_checkpoints = 0
-
+            print(f"Checkpointing at {self.checkpoint_words[self.next_checkpoint_idx]:,} words (step {state.global_step})")
+            self.next_checkpoint_idx += 1
         return control
 
 # --- Model Train Script --- #
@@ -155,7 +152,7 @@ def train_model(
     initial_save_steps = max(1, total_steps//1000)
     warmup_steps = int(total_steps * 0.05) if use_warmup else 0  # 5% of total steps for warmup
 
-    custom_checkpointing_callback = CustomCheckpointingCallback(total_steps)
+    custom_checkpointing_callback = CustomCheckpointingCallback(seq_len)
 
     training_args = TrainingArguments(
         output_dir=output_dir,
@@ -191,6 +188,11 @@ def train_model(
         train_dataset=train_dataset,
         callbacks=[custom_checkpointing_callback]
     )
+
+    if push_to_hub:
+        # pushing up tokenizer to hub
+        tokenizer = AutoTokenizer.from_pretrained("babylm-seqlen/tokenizer")
+        tokenizer.push_to_hub(f"babylm-seqlen/{model_type}-{seq_len}" + ("-warmup" if use_warmup else ""))
 
     ###
     ### Print Model Statistics

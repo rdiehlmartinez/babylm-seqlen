@@ -80,6 +80,7 @@ def train_model(
     dry_run=False,
     num_devices=4,
     accumulation_steps=1,
+    use_warmup=False,
 ):
     ###
     ### Setup Dataset and Models
@@ -106,13 +107,13 @@ def train_model(
 
     if dry_run:
         train_dataset = train_dataset.select(range(100))
-        output_dir = f"./dryruns/{model_type}-babylm-{seq_len}"
+        output_dir = f"./dryruns/{model_type}-babylm-{seq_len}" + ("-warmup" if use_warmup else "")
     else:
-        output_dir = f"./checkpoints/{model_type}-babylm-{seq_len}"
+        output_dir = f"./checkpoints/{model_type}-babylm-{seq_len}" + ("-warmup" if use_warmup else "")
 
     os.makedirs(output_dir, exist_ok=True)
 
-    run_name = f"{model_type}_babylm_{seq_len}"
+    run_name = f"{model_type}_babylm_{seq_len}" + ("_warmup" if use_warmup else "")
 
     if model_type == "opt":
         config = OPTConfig(
@@ -152,11 +153,9 @@ def train_model(
     # We then increase the checkpointing rate by a factor of 10 every 10 checkpoints.
     total_steps = TRAIN_EPOCHS * len(train_dataset) // GLOBAL_BATCH_SIZE
     initial_save_steps = max(1, total_steps//1000)
-    warmup_steps = int(total_steps * 0.05)  # 5% of total steps for warmup
+    warmup_steps = int(total_steps * 0.05) if use_warmup else 0  # 5% of total steps for warmup
 
     custom_checkpointing_callback = CustomCheckpointingCallback(total_steps)
-    print(f'Initial save steps set to 1% of an epoch: {initial_save_steps:.2f} steps')
-    print(f'Warmup steps set to 5% of total steps: {warmup_steps:.2f} steps')
 
     training_args = TrainingArguments(
         output_dir=output_dir,
@@ -173,11 +172,11 @@ def train_model(
         logging_steps=max(total_steps // 1000, 1),
         disable_tqdm=False,
         push_to_hub=push_to_hub,
-        hub_model_id=f"babylm-seqlen/{model_type}-{seq_len}",
+        hub_model_id=f"babylm-seqlen/{model_type}-{seq_len}" + ("-warmup" if use_warmup else ""),
         hub_strategy="every_save",
-        learning_rate=5e-5*(seq_len/64), # 5e-5 is the default in HF 
-        warmup_steps=warmup_steps,  # Add warmup steps
-        lr_scheduler_type="linear"  # Use linear warmup
+        learning_rate=5e-5*(seq_len/64) if use_warmup else 5e-5,  # Scale learning rate with sequence length if using warmup
+        warmup_steps=warmup_steps,  # Add warmup steps if enabled
+        lr_scheduler_type="linear" if use_warmup else "constant"  # Use linear warmup if enabled
     )
 
     print(f"Training arguments:\n{training_args}")
@@ -244,6 +243,11 @@ def main():
         help="If set, do NOT push to the Hugging Face Hub.",
     )
     parser.add_argument("--dry_run", action="store_true")
+    parser.add_argument(
+        "--use_warmup",
+        action="store_true",
+        help="If set, use learning rate warmup with sequence length scaling.",
+    )
 
     args = parser.parse_args()
 
@@ -255,6 +259,7 @@ def main():
         dry_run=args.dry_run,
         num_devices=args.num_devices,
         accumulation_steps=args.accumulation_steps,
+        use_warmup=args.use_warmup,
     )
 
 if __name__ == "__main__":

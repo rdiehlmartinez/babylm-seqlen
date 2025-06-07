@@ -45,25 +45,30 @@ class CustomCheckpointingCallback(TrainerCallback):
     - Every 1M words until 10M
     - Every 10M words until 100M
     - Every 100M words until 1B
+
+    Ok but also this is not entirely correct, because we actually compute the number of tokens 
+    rather than the number of words.
     """
-    def __init__(self, seq_len):
+    def __init__(self, total_steps, seq_len):
         super().__init__()
-        self.seq_len = seq_len
-        self.words_per_step = GLOBAL_BATCH_SIZE * seq_len
-        # Build the list of checkpoint word counts
-        self.checkpoint_words = (
-            [i * 1_000_000 for i in range(1, 11)] +      # 1M to 10M
-            [i * 10_000_000 for i in range(2, 11)] +     # 20M to 100M
-            [i * 100_000_000 for i in range(2, 11)]      # 200M to 1B
+
+        total_tokens = total_steps * GLOBAL_BATCH_SIZE * self.seq_len
+
+        self.token_to_word_ratio = total_tokens//1_000_000_000
+
+        self.checkpoint_tokens = (
+            [self.token_to_word_ratio * i * 1_000_000 for i in range(1, 11)] +      # 1M to 10M
+            [self.token_to_word_ratio * i * 10_000_000 for i in range(2, 11)] +     # 20M to 100M
+            [self.token_to_word_ratio * i * 100_000_000 for i in range(2, 11)]      # 200M to 1B
         )
         self.next_checkpoint_idx = 0
 
     def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
-        words_seen = state.global_step * self.words_per_step
-        if (self.next_checkpoint_idx < len(self.checkpoint_words) and
-            words_seen >= self.checkpoint_words[self.next_checkpoint_idx]):
+        tokens_seen = state.global_step * GLOBAL_BATCH_SIZE * self.seq_len
+        if (self.next_checkpoint_idx < len(self.checkpoint_tokens) and
+            tokens_seen >= self.checkpoint_tokens[self.next_checkpoint_idx]):
             control.should_save = True
-            print(f"Checkpointing at {self.checkpoint_words[self.next_checkpoint_idx]:,} words (step {state.global_step})")
+            print(f"Checkpointing at {self.checkpoint_tokens[self.next_checkpoint_idx]:,} tokens / {self.checkpoint_tokens[self.next_checkpoint_idx]//self.token_to_word_ratio:,} words (step {state.global_step})")
             self.next_checkpoint_idx += 1
         return control
 
@@ -78,6 +83,7 @@ def train_model(
     num_devices=4,
     accumulation_steps=1,
     use_warmup=False,
+    special_id="",
 ):
     ###
     ### Setup Dataset and Models
@@ -102,15 +108,17 @@ def train_model(
 
     train_dataset = dataset["train"]
 
+    suffix = ("-warmup" if use_warmup else "") + (f"-{special_id}" if special_id else "")
+
     if dry_run:
         train_dataset = train_dataset.select(range(100))
-        output_dir = f"./dryruns/{model_type}-babylm-{seq_len}" + ("-warmup" if use_warmup else "")
+        output_dir = f"./dryruns/{model_type}-babylm-{seq_len}{suffix}"
     else:
-        output_dir = f"./checkpoints/{model_type}-babylm-{seq_len}" + ("-warmup" if use_warmup else "")
+        output_dir = f"./checkpoints/{model_type}-babylm-{seq_len}{suffix}"
 
     os.makedirs(output_dir, exist_ok=True)
 
-    run_name = f"{model_type}_babylm_{seq_len}" + ("_warmup" if use_warmup else "")
+    run_name = f"{model_type}_babylm_{seq_len}{suffix}"
 
     if model_type == "opt":
         config = OPTConfig(
@@ -152,7 +160,7 @@ def train_model(
     initial_save_steps = max(1, total_steps//1000)
     warmup_steps = int(total_steps * 0.05) if use_warmup else 0  # 5% of total steps for warmup
 
-    custom_checkpointing_callback = CustomCheckpointingCallback(seq_len)
+    custom_checkpointing_callback = CustomCheckpointingCallback(total_steps, seq_len)
 
     training_args = TrainingArguments(
         output_dir=output_dir,
@@ -169,7 +177,7 @@ def train_model(
         logging_steps=max(total_steps // 1000, 1),
         disable_tqdm=False,
         push_to_hub=push_to_hub,
-        hub_model_id=f"babylm-seqlen/{model_type}-{seq_len}" + ("-warmup" if use_warmup else ""),
+        hub_model_id=f"babylm-seqlen/{model_type}-{seq_len}{suffix}",
         hub_strategy="every_save",
         learning_rate=5e-5*(seq_len/64) if use_warmup else 5e-5,  # Scale learning rate with sequence length if using warmup
         warmup_steps=warmup_steps,  # Add warmup steps if enabled
@@ -192,7 +200,7 @@ def train_model(
     if push_to_hub:
         # pushing up tokenizer to hub
         tokenizer = AutoTokenizer.from_pretrained("babylm-seqlen/tokenizer")
-        tokenizer.push_to_hub(f"babylm-seqlen/{model_type}-{seq_len}" + ("-warmup" if use_warmup else ""))
+        tokenizer.push_to_hub(f"babylm-seqlen/{model_type}-{seq_len}{suffix}")
 
     ###
     ### Print Model Statistics
@@ -250,6 +258,11 @@ def main():
         action="store_true",
         help="If set, use learning rate warmup with sequence length scaling.",
     )
+    parser.add_argument(
+        "--special_id",
+        type=str,
+        help="Special ID to append to the model name and project name.",
+    )
 
     args = parser.parse_args()
 
@@ -262,6 +275,7 @@ def main():
         num_devices=args.num_devices,
         accumulation_steps=args.accumulation_steps,
         use_warmup=args.use_warmup,
+        special_id=args.special_id,
     )
 
 if __name__ == "__main__":

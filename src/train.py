@@ -3,6 +3,7 @@ import time
 
 from datasets import load_dataset
 from transformers import (
+    AutoTokenizer,
     OPTConfig,
     OPTForCausalLM,
     Trainer,
@@ -187,6 +188,11 @@ def train_model(
         train_dataset=train_dataset,
         callbacks=[custom_checkpointing_callback]
     )
+
+    if push_to_hub:
+        # pushing up tokenizer to hub
+        tokenizer = AutoTokenizer.from_pretrained("babylm-seqlen/tokenizer")
+        tokenizer.push_to_hub(f"babylm-seqlen/{model_type}-{seq_len}" + ("-warmup" if use_warmup else ""))
 
     ###
     ### Print Model Statistics

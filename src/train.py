@@ -52,14 +52,16 @@ class CustomCheckpointingCallback(TrainerCallback):
     def __init__(self, total_steps, seq_len):
         super().__init__()
 
-        total_tokens = total_steps * GLOBAL_BATCH_SIZE * self.seq_len
+        self.seq_len = seq_len
+        
+        total_tokens = total_steps * GLOBAL_BATCH_SIZE * seq_len
 
-        self.token_to_word_ratio = total_tokens//1_000_000_000
+        self.token_to_word_ratio = total_tokens/1_000_000_000
 
         self.checkpoint_tokens = (
-            [self.token_to_word_ratio * i * 1_000_000 for i in range(1, 11)] +      # 1M to 10M
-            [self.token_to_word_ratio * i * 10_000_000 for i in range(2, 11)] +     # 20M to 100M
-            [self.token_to_word_ratio * i * 100_000_000 for i in range(2, 11)]      # 200M to 1B
+            [int(self.token_to_word_ratio * i * 1_000_000) for i in range(1, 11)] +      # 1M to 10M
+            [int(self.token_to_word_ratio * i * 10_000_000) for i in range(2, 11)] +     # 20M to 100M
+            [int(self.token_to_word_ratio * i * 100_000_000) for i in range(2, 11)]      # 200M to 1B
         )
         self.next_checkpoint_idx = 0
 
@@ -68,7 +70,7 @@ class CustomCheckpointingCallback(TrainerCallback):
         if (self.next_checkpoint_idx < len(self.checkpoint_tokens) and
             tokens_seen >= self.checkpoint_tokens[self.next_checkpoint_idx]):
             control.should_save = True
-            print(f"Checkpointing at {self.checkpoint_tokens[self.next_checkpoint_idx]:,} tokens / {self.checkpoint_tokens[self.next_checkpoint_idx]//self.token_to_word_ratio:,} words (step {state.global_step})")
+            print(f"Checkpointing at {self.checkpoint_tokens[self.next_checkpoint_idx]:,} tokens / {int(self.checkpoint_tokens[self.next_checkpoint_idx]/self.token_to_word_ratio):,} words (step {state.global_step})")
             self.next_checkpoint_idx += 1
         return control
 
@@ -150,6 +152,14 @@ def train_model(
             mode="disabled" if dry_run else "online",
         )
 
+    if push_to_hub:
+        # pushing up tokenizer to hub
+        tokenizer = AutoTokenizer.from_pretrained("babylm-seqlen/tokenizer")
+        tokenizer.push_to_hub(f"babylm-seqlen/{model_type}-{seq_len}{suffix}")
+
+    import time 
+    time.sleep(10)
+
     ###
     ### Setup Training Arguments
     ###
@@ -168,8 +178,8 @@ def train_model(
         gradient_accumulation_steps=accumulation_steps,
         num_train_epochs=TRAIN_EPOCHS,
         eval_strategy="no",
-        save_strategy="steps",
-        save_steps=initial_save_steps,
+        save_strategy="no",
+        # save_steps=initial_save_steps,
         bf16=True,
         report_to="wandb",
         run_name=run_name,
@@ -196,11 +206,6 @@ def train_model(
         train_dataset=train_dataset,
         callbacks=[custom_checkpointing_callback]
     )
-
-    if push_to_hub:
-        # pushing up tokenizer to hub
-        tokenizer = AutoTokenizer.from_pretrained("babylm-seqlen/tokenizer")
-        tokenizer.push_to_hub(f"babylm-seqlen/{model_type}-{seq_len}{suffix}")
 
     ###
     ### Print Model Statistics

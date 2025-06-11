@@ -1,17 +1,16 @@
 import os
 import time
+import shutil
+from pathlib import Path
+
+import torch
 
 from datasets import load_dataset
 from transformers import (
-    AutoTokenizer,
     OPTConfig,
     OPTForCausalLM,
     Trainer,
     TrainingArguments,
-)
-
-from transformers.trainer_utils import (
-    SaveStrategy,
 )
 
 from transformers.trainer_callback import (
@@ -53,9 +52,7 @@ class CustomCheckpointingCallback(TrainerCallback):
         super().__init__()
 
         self.seq_len = seq_len
-        
         total_tokens = total_steps * GLOBAL_BATCH_SIZE * seq_len
-
         self.token_to_word_ratio = total_tokens/1_000_000_000
 
         self.checkpoint_tokens = (
@@ -63,16 +60,120 @@ class CustomCheckpointingCallback(TrainerCallback):
             [int(self.token_to_word_ratio * i * 10_000_000) for i in range(2, 11)] +     # 20M to 100M
             [int(self.token_to_word_ratio * i * 100_000_000) for i in range(2, 11)]      # 200M to 1B
         )
+        
         self.next_checkpoint_idx = 0
 
     def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         tokens_seen = state.global_step * GLOBAL_BATCH_SIZE * self.seq_len
         if (self.next_checkpoint_idx < len(self.checkpoint_tokens) and
             tokens_seen >= self.checkpoint_tokens[self.next_checkpoint_idx]):
+            print(f"\nDEBUG: Triggering checkpoint at step {state.global_step}")
             control.should_save = True
-            print(f"Checkpointing at {self.checkpoint_tokens[self.next_checkpoint_idx]:,} tokens / {int(self.checkpoint_tokens[self.next_checkpoint_idx]/self.token_to_word_ratio):,} words (step {state.global_step})")
+            words_seen = int(self.checkpoint_tokens[self.next_checkpoint_idx]/self.token_to_word_ratio)
+            debug_message = (
+                f"Checkpoint at {words_seen:,} words ({self.checkpoint_tokens[self.next_checkpoint_idx]:,} tokens) "
+                f"| Step {state.global_step:,} | Progress: {self.next_checkpoint_idx + 1}/{len(self.checkpoint_tokens)}"
+            )
+            print(f"DEBUG: {debug_message}")
             self.next_checkpoint_idx += 1
         return control
+
+import json 
+
+from transformers.trainer_utils import (
+    HubStrategy,
+    PREFIX_CHECKPOINT_DIR,
+)
+
+from transformers.utils import (
+    CONFIG_NAME,
+    WEIGHTS_NAME,
+    SAFE_WEIGHTS_NAME,
+    WEIGHTS_INDEX_NAME,
+    SAFE_WEIGHTS_INDEX_NAME,
+)
+
+TRAINING_ARGS_NAME = "training_args.bin"
+
+from huggingface_hub import upload_folder
+
+class CustomTrainer(Trainer):
+
+    def __init__(self, *args, **kwargs):
+        self.seq_len = kwargs.pop("seq_len")
+        self.total_steps = kwargs.pop("total_steps")
+
+        total_tokens = self.total_steps * GLOBAL_BATCH_SIZE * self.seq_len
+
+        self.token_to_word_ratio = total_tokens/1_000_000_000
+
+        # NOTE: Literally repeating this from the Checkpointing class but honestly sue me 
+        # I don't care anymore 
+        self.checkpoint_words = (
+            [int(i * 1_000_000) for i in range(1, 11)] +      # 1M to 10M
+            [int(i * 10_000_000) for i in range(2, 11)] +     # 20M to 100M
+            [int(i * 100_000_000) for i in range(2, 11)]      # 200M to 1B
+        )
+
+        self.next_checkpoint_idx = 0
+
+        super().__init__(*args, **kwargs)
+
+    def _push_from_checkpoint(self, checkpoint_folder):
+        # Only push from one node.
+        if not self.is_world_process_zero() or self.args.hub_strategy == HubStrategy.END:
+            return
+        # If we haven't finished the last push, we don't do this one unless args.hub_always_push=True.
+        if not self.args.hub_always_push and self.push_in_progress is not None and not self.push_in_progress.is_done():
+            return
+
+        output_dir = self.args.output_dir
+        # To avoid a new synchronization of all model weights, we just copy the file from the checkpoint folder
+        modeling_files = [CONFIG_NAME, WEIGHTS_NAME, SAFE_WEIGHTS_NAME]
+        #  Add sharded checkpoints if we have an index
+        for index_file in [WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_INDEX_NAME]:
+            index_path = os.path.join(checkpoint_folder, index_file)
+            if os.path.isfile(index_path):
+                modeling_files.append(index_file)
+                with open(index_path) as f:
+                    index = json.loads(f.read())
+                shard_files = list(set(index["weight_map"].values()))
+                modeling_files.extend(shard_files)
+
+        for modeling_file in modeling_files:
+            if os.path.isfile(os.path.join(checkpoint_folder, modeling_file)):
+                shutil.copy(os.path.join(checkpoint_folder, modeling_file), os.path.join(output_dir, modeling_file))
+        # Saving the processing class is fast and we don't know how many files it may have spawned, so we resave it to be sure.
+        if self.processing_class is not None:
+            self.processing_class.save_pretrained(output_dir)
+        # Same for the training arguments
+        torch.save(self.args, os.path.join(output_dir, TRAINING_ARGS_NAME))
+
+        commit_message = f"Checkpoint step: {self.state.global_step:,} | Target words: {self.checkpoint_words[self.next_checkpoint_idx]:,} | Actual tokens: {self.seq_len*self.state.global_step*GLOBAL_BATCH_SIZE:,} | Actual words: {self.state.global_step*GLOBAL_BATCH_SIZE*self.seq_len/self.token_to_word_ratio:,} | Progress: {self.next_checkpoint_idx + 1}/{len(self.checkpoint_words)}"
+        self.next_checkpoint_idx += 1
+
+        _ = upload_folder(
+            repo_id=self.hub_model_id,
+            folder_path=output_dir,
+            commit_message=commit_message,
+            token=self.args.hub_token,
+            run_as_future=False,
+            ignore_patterns=["_*", f"{PREFIX_CHECKPOINT_DIR}-*"],
+        )
+
+        if self.args.hub_strategy in [HubStrategy.CHECKPOINT, HubStrategy.ALL_CHECKPOINTS]:
+            path_in_repo = (
+                "last-checkpoint" if self.args.hub_strategy == HubStrategy.CHECKPOINT else Path(checkpoint_folder).name
+            )
+            _ = upload_folder(
+                repo_id=self.hub_model_id,
+                folder_path=checkpoint_folder,
+                path_in_repo=path_in_repo,
+                commit_message=commit_message + ", checkpoint",
+                token=self.args.hub_token,
+                run_as_future=False,
+            )
+
 
 # --- Model Train Script --- #
 
@@ -152,22 +253,9 @@ def train_model(
             mode="disabled" if dry_run else "online",
         )
 
-    if push_to_hub:
-        # pushing up tokenizer to hub
-        tokenizer = AutoTokenizer.from_pretrained("babylm-seqlen/tokenizer")
-        tokenizer.push_to_hub(f"babylm-seqlen/{model_type}-{seq_len}{suffix}")
-
-    import time 
-    time.sleep(10)
-
-    ###
-    ### Setup Training Arguments
-    ###
-
     # Initial checkpointing rate is every 1M words, which is 1% of an epoch.
     # We then increase the checkpointing rate by a factor of 10 every 10 checkpoints.
     total_steps = TRAIN_EPOCHS * len(train_dataset) // GLOBAL_BATCH_SIZE
-    initial_save_steps = max(1, total_steps//1000)
     warmup_steps = int(total_steps * 0.05) if use_warmup else 0  # 5% of total steps for warmup
 
     custom_checkpointing_callback = CustomCheckpointingCallback(total_steps, seq_len)
@@ -179,7 +267,6 @@ def train_model(
         num_train_epochs=TRAIN_EPOCHS,
         eval_strategy="no",
         save_strategy="no",
-        # save_steps=initial_save_steps,
         bf16=True,
         report_to="wandb",
         run_name=run_name,
@@ -189,9 +276,9 @@ def train_model(
         push_to_hub=push_to_hub,
         hub_model_id=f"babylm-seqlen/{model_type}-{seq_len}{suffix}",
         hub_strategy="every_save",
-        learning_rate=5e-5*(seq_len/64) if use_warmup else 5e-5,  # Scale learning rate with sequence length if using warmup
-        warmup_steps=warmup_steps,  # Add warmup steps if enabled
-        lr_scheduler_type="linear" if use_warmup else "constant"  # Use linear warmup if enabled
+        learning_rate=5e-5*(seq_len/64) if use_warmup else 5e-5,
+        warmup_steps=warmup_steps,
+        lr_scheduler_type="linear" if use_warmup else "constant",
     )
 
     print(f"Training arguments:\n{training_args}")
@@ -200,11 +287,13 @@ def train_model(
     ### Setup Trainer
     ###
 
-    trainer = Trainer(
+    trainer = CustomTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        callbacks=[custom_checkpointing_callback]
+        callbacks=[custom_checkpointing_callback],
+        total_steps=total_steps,
+        seq_len=seq_len,
     )
 
     ###

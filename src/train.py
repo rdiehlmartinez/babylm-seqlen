@@ -152,14 +152,24 @@ class CustomTrainer(Trainer):
         commit_message = f"Checkpoint step: {self.state.global_step:,} | Target words: {self.checkpoint_words[self.next_checkpoint_idx]:,} | Actual tokens: {self.seq_len*self.state.global_step*GLOBAL_BATCH_SIZE:,} | Actual words: {self.state.global_step*GLOBAL_BATCH_SIZE*self.seq_len/self.token_to_word_ratio:,} | Progress: {self.next_checkpoint_idx + 1}/{len(self.checkpoint_words)}"
         self.next_checkpoint_idx += 1
 
-        _ = upload_folder(
-            repo_id=self.hub_model_id,
-            folder_path=output_dir,
-            commit_message=commit_message,
-            token=self.args.hub_token,
-            run_as_future=False,
-            ignore_patterns=["_*", f"{PREFIX_CHECKPOINT_DIR}-*"],
-        )
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                _ = upload_folder(
+                    repo_id=self.hub_model_id,
+                    folder_path=output_dir,
+                    commit_message=commit_message,
+                    token=self.args.hub_token,
+                    run_as_future=False,
+                    ignore_patterns=["_*", f"{PREFIX_CHECKPOINT_DIR}-*"],
+                )
+                break  # Success!
+            except Exception as e:
+                print(f"Upload attempt {attempt+1} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(15)  # Wait before retrying
+                else:
+                    print("Max upload retries reached. Skipping this checkpoint push.")
 
         if self.args.hub_strategy in [HubStrategy.CHECKPOINT, HubStrategy.ALL_CHECKPOINTS]:
             path_in_repo = (

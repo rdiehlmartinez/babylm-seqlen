@@ -1,0 +1,14 @@
+TEMPERATURE: 1.00
+
+### UID ACCURACY
+regular_0_ops: 29.37
+regular_1_ops: 46.29
+regular_2_ops: 44.72
+regular_3_ops: 40.43
+regular_4_ops: 39.61
+regular_5_ops: 47.17
+regular: 41.27
+
+### AVERAGE ACCURACY
+41.27
+

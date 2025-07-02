@@ -25,6 +25,10 @@ name = "pytorch"
 url = "https://download.pytorch.org/whl/cu118"
 priority = "explicit"
 
+
+[tool.poetry.group.dev.dependencies]
+statsmodels = "^0.14.4"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
